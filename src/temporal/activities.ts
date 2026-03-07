@@ -1,5 +1,6 @@
 import { Context } from '@temporalio/activity';
 import { getRealtimeClient, getRestClient, channelName } from './ably-clients';
+import { streamClaude } from './llm';
 import type { Message } from './workflows';
 
 export interface LLMResult {
@@ -7,6 +8,8 @@ export interface LLMResult {
   fullText: string;
   toolName?: string;
   toolInput?: Record<string, unknown>;
+  toolUseId?: string;
+  rawContentBlocks?: unknown[];
   msgSerial?: string;
 }
 
@@ -49,8 +52,6 @@ export async function publishUserMessage(
  * Dedup window: documented as ~2 minutes from original publish, but tested
  * to confirm that appends/updates extend it. Since we constantly append
  * tokens during streaming, the window stays open for the stream's lifetime.
- *
- * Currently uses mock responses — Claude integration comes in Milestone 4.
  */
 export async function callLLMStreaming(
   sessionId: string,
@@ -86,22 +87,18 @@ export async function callLLMStreaming(
     await realtimeChannel.updateMessage({ serial: msgSerial, data: '' });
   }
 
-  // Mock token streaming — replaced with real Claude streaming in Milestone 4
-  const lastUserMsg = messages.filter((m) => m.role === 'user').pop()?.content ?? '';
-  const mockResponse = `This is a mock response to: "${lastUserMsg}". Real Claude streaming comes in Milestone 4.`;
-  const tokens = mockResponse.split(' ');
-
+  // Stream Claude response, appending each token to Ably
   const appendPromises: Promise<unknown>[] = [];
   let fullText = '';
 
-  for (const token of tokens) {
-    Context.current().heartbeat();
-    const tokenWithSpace = fullText.length > 0 ? ` ${token}` : token;
-    fullText += tokenWithSpace;
-    appendPromises.push(realtimeChannel.appendMessage({ serial: msgSerial, data: tokenWithSpace }));
-    // Simulate token delay
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
+  const llmResult = await streamClaude(messages, {
+    onToken: (text) => {
+      fullText += text;
+      // Don't await — pipeline appends for throughput (per Ably docs)
+      appendPromises.push(realtimeChannel.appendMessage({ serial: msgSerial, data: text }));
+    },
+    heartbeat: () => Context.current().heartbeat(),
+  });
 
   // Wait for all appends; fall back to full updateMessage if any failed
   const results = await Promise.allSettled(appendPromises);
@@ -116,7 +113,15 @@ export async function callLLMStreaming(
     extras: { headers: { status: 'complete' } },
   });
 
-  return { type: 'text', fullText, msgSerial };
+  return {
+    type: llmResult.type,
+    fullText: llmResult.fullText,
+    toolName: llmResult.toolName,
+    toolInput: llmResult.toolInput,
+    toolUseId: llmResult.toolUseId,
+    rawContentBlocks: llmResult.rawContentBlocks,
+    msgSerial,
+  };
 }
 
 export async function executeToolCall(

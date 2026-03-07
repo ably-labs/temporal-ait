@@ -1,0 +1,194 @@
+import Anthropic from '@anthropic-ai/sdk';
+import type { Message } from './workflows';
+
+let client: Anthropic | null = null;
+
+function getClient(): Anthropic {
+  if (!client) {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error('ANTHROPIC_API_KEY environment variable is required');
+    client = new Anthropic({ apiKey });
+  }
+  return client;
+}
+
+export const SYSTEM_PROMPT = `You are a helpful customer support agent for Acme Corp, an online retailer.
+
+You can help customers with:
+- Order tracking and delivery status
+- Refund inquiries
+- Account information
+
+Be concise, friendly, and professional. When you need to look up information, use the available tools.
+
+If a customer has a billing dispute, complex complaint, or requests to speak with a human, you should escalate by responding with exactly: [ESCALATE: reason for escalation]
+
+Do not make up order details, tracking numbers, or account information — always use the tools to look them up.`;
+
+export const TOOLS: Anthropic.Tool[] = [
+  {
+    name: 'lookupOrder',
+    description: 'Look up an order by order ID to get status, tracking number, and estimated delivery date.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        orderId: { type: 'string', description: 'The order ID (e.g. #12345)' },
+      },
+      required: ['orderId'],
+    },
+  },
+  {
+    name: 'checkRefundStatus',
+    description: 'Check the status of a refund request by refund ID or order ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        refundId: { type: 'string', description: 'The refund or order ID' },
+      },
+      required: ['refundId'],
+    },
+  },
+  {
+    name: 'getAccountDetails',
+    description: 'Get account details for a customer by their customer ID or name.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        customerId: { type: 'string', description: 'The customer ID or name' },
+      },
+      required: ['customerId'],
+    },
+  },
+];
+
+export interface StreamCallbacks {
+  onToken: (text: string) => void;
+  heartbeat: () => void;
+}
+
+export interface LLMStreamResult {
+  type: 'text' | 'tool_use' | 'escalate';
+  fullText: string;
+  toolName?: string;
+  toolInput?: Record<string, unknown>;
+  toolUseId?: string;
+  // Raw content blocks from Claude — needed for tool_use round-trips.
+  // The assistant message must include the tool_use block for Claude to
+  // accept the subsequent tool_result.
+  rawContentBlocks?: unknown[];
+}
+
+/**
+ * Stream a Claude response, calling onToken for each text delta.
+ * Returns the full result including tool use detection and escalation.
+ */
+export async function streamClaude(
+  messages: Message[],
+  callbacks: StreamCallbacks
+): Promise<LLMStreamResult> {
+  const anthropic = getClient();
+
+  // Convert our message format to Anthropic's format
+  const anthropicMessages: Anthropic.MessageParam[] = messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => {
+      if (m.role === 'tool') {
+        return {
+          role: 'user' as const,
+          content: [
+            {
+              type: 'tool_result' as const,
+              tool_use_id: m.toolUseId ?? 'unknown',
+              content: m.content,
+            },
+          ],
+        };
+      }
+      // Assistant messages with tool_use need the raw content blocks
+      if (m.role === 'assistant' && m.rawContentBlocks) {
+        return {
+          role: 'assistant' as const,
+          content: m.rawContentBlocks as Anthropic.ContentBlock[],
+        };
+      }
+      return {
+        role: m.role as 'user' | 'assistant',
+        content: m.content,
+      };
+    });
+
+  const stream = anthropic.messages.stream({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 1024,
+    system: SYSTEM_PROMPT,
+    messages: anthropicMessages,
+    tools: TOOLS,
+  });
+
+  let fullText = '';
+  let toolName: string | undefined;
+  let toolInput: Record<string, unknown> | undefined;
+  let toolInputJson = '';
+  let toolUseId: string | undefined;
+  let hasToolUse = false;
+
+  for await (const event of stream) {
+    callbacks.heartbeat();
+
+    if (event.type === 'content_block_start') {
+      if (event.content_block.type === 'tool_use') {
+        hasToolUse = true;
+        toolName = event.content_block.name;
+        toolUseId = event.content_block.id;
+        toolInputJson = '';
+      }
+    } else if (event.type === 'content_block_delta') {
+      if (event.delta.type === 'text_delta') {
+        fullText += event.delta.text;
+        callbacks.onToken(event.delta.text);
+      } else if (event.delta.type === 'input_json_delta') {
+        toolInputJson += event.delta.partial_json;
+      }
+    }
+  }
+
+  // Parse tool input if we got a tool use
+  if (hasToolUse && toolInputJson) {
+    try {
+      toolInput = JSON.parse(toolInputJson);
+    } catch {
+      toolInput = {};
+    }
+  }
+
+  // Check for escalation pattern in text
+  const escalateMatch = fullText.match(/\[ESCALATE:\s*(.+?)\]/);
+  if (escalateMatch) {
+    return { type: 'escalate', fullText };
+  }
+
+  if (hasToolUse) {
+    // Build the raw content blocks that Claude expects for tool_use round-trips
+    const rawContentBlocks: unknown[] = [];
+    if (fullText) {
+      rawContentBlocks.push({ type: 'text', text: fullText });
+    }
+    rawContentBlocks.push({
+      type: 'tool_use',
+      id: toolUseId,
+      name: toolName,
+      input: toolInput ?? {},
+    });
+
+    return {
+      type: 'tool_use',
+      fullText,
+      toolName,
+      toolInput,
+      toolUseId,
+      rawContentBlocks,
+    };
+  }
+
+  return { type: 'text', fullText };
+}

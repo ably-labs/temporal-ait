@@ -10,10 +10,15 @@ export interface Message {
   role: 'user' | 'assistant' | 'system' | 'tool';
   content: string;
   toolName?: string;
+  toolUseId?: string;
+  // Raw Anthropic content blocks for assistant messages with tool_use
+  // Needed so the follow-up API call includes the tool_use block
+  rawContentBlocks?: unknown[];
 }
 
 const activities = proxyActivities<Activities>({
-  startToCloseTimeout: '2 minutes',
+  startToCloseTimeout: '5 minutes',
+  heartbeatTimeout: '30 seconds',
   retry: {
     maximumAttempts: 3,
   },
@@ -56,14 +61,23 @@ export async function supportSessionWorkflow(
     const llmResult = await activities.callLLMStreaming(sessionId, messages, turnIndex);
     turnIndex++;
 
-    messages.push({ role: 'assistant', content: llmResult.fullText });
+    messages.push({
+      role: 'assistant',
+      content: llmResult.fullText,
+      rawContentBlocks: llmResult.rawContentBlocks,
+    });
 
     if (llmResult.type === 'tool_use') {
       const toolResult = await activities.executeToolCall(
         llmResult.toolName!,
         llmResult.toolInput!
       );
-      messages.push({ role: 'tool', content: JSON.stringify(toolResult), toolName: llmResult.toolName });
+      messages.push({
+        role: 'tool',
+        content: JSON.stringify(toolResult),
+        toolName: llmResult.toolName,
+        toolUseId: llmResult.toolUseId,
+      });
 
       // Follow-up LLM call with tool results
       const followUp = await activities.callLLMStreaming(sessionId, messages, turnIndex);
