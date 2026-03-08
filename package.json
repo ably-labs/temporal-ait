@@ -16,12 +16,14 @@
     "@temporalio/worker": "^1.15.0",
     "@temporalio/workflow": "^1.15.0",
     "ably": "^2.19.0",
+    "jsonwebtoken": "^9.0.3",
     "next": "16.1.6",
     "react": "19.2.3",
     "react-dom": "19.2.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
