@@ -1,3 +1,6 @@
+import { config } from 'dotenv';
+config({ path: '.env.local' });
+
 import { NativeConnection, Worker } from '@temporalio/worker';
 import * as activities from './activities';
 import { closeRealtimeClient } from './ably-clients';

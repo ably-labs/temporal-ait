@@ -15,11 +15,18 @@ export interface LLMResult {
 
 export interface Activities {
   publishUserMessage(sessionId: string, message: string, customerName: string, messageId: string): Promise<void>;
+  publishAgentMessage(sessionId: string, message: string, messageId: string): Promise<void>;
   callLLMStreaming(sessionId: string, messages: Message[], turnIndex: number): Promise<LLMResult>;
-  executeToolCall(toolName: string, toolInput: Record<string, unknown>): Promise<unknown>;
+  executeToolCall(sessionId: string, toolName: string, toolInput: Record<string, unknown>): Promise<unknown>;
+  publishEscalation(sessionId: string, reason: string): Promise<void>;
   notifyHumanAgent(
     sessionId: string,
     context: { customerName: string; reason: string; history: Message[] }
+  ): Promise<string>;
+  updateEscalationStatus(
+    escalationSerial: string,
+    status: 'responding' | 'resolved' | 'dismissed',
+    sessionId: string
   ): Promise<void>;
 }
 
@@ -37,6 +44,25 @@ export async function publishUserMessage(
   const rest = getRestClient();
   const channel = rest.channels.get(channelName(sessionId));
   await channel.publish({ id: messageId, name: 'user', data: message, clientId: customerName });
+}
+
+/**
+ * Publish a human agent's message to the session channel.
+ * Uses name 'response' so the frontend renders it as an assistant/agent bubble.
+ */
+export async function publishAgentMessage(
+  sessionId: string,
+  message: string,
+  messageId: string
+): Promise<void> {
+  const rest = getRestClient();
+  const channel = rest.channels.get(channelName(sessionId));
+  await channel.publish({
+    id: messageId,
+    name: 'response',
+    data: message,
+    extras: { headers: { status: 'complete', source: 'human-agent' } },
+  });
 }
 
 /**
@@ -103,6 +129,7 @@ export async function callLLMStreaming(
   // Wait for all appends; fall back to full updateMessage if any failed
   const results = await Promise.allSettled(appendPromises);
   const anyFailed = results.some((r) => r.status === 'rejected');
+
   if (anyFailed) {
     await realtimeChannel.updateMessage({ serial: msgSerial, data: fullText });
   }
@@ -124,40 +151,103 @@ export async function callLLMStreaming(
   };
 }
 
+/**
+ * Execute a tool call and publish status to the session channel.
+ * Publishes a 'tool' message with loading state, then updates with result.
+ */
 export async function executeToolCall(
+  sessionId: string,
   toolName: string,
   toolInput: Record<string, unknown>
 ): Promise<unknown> {
+  const realtime = getRealtimeClient();
+  const channel = realtime.channels.get(channelName(sessionId));
+
+  // Publish tool call start
+  const result = await channel.publish({
+    name: 'tool',
+    data: JSON.stringify({ toolName, input: toolInput, status: 'calling' }),
+  });
+  const serial = result.serials[0];
+
+  let toolResult: unknown;
   switch (toolName) {
     case 'lookupOrder':
-      return {
+      toolResult = {
         orderId: toolInput.orderId,
         status: 'shipped',
         trackingNumber: 'TRK-12345-MOCK',
         estimatedDelivery: '2026-03-10',
       };
+      break;
     case 'checkRefundStatus':
-      return { refundId: toolInput.refundId, status: 'processing', estimatedCompletion: '3-5 business days' };
+      toolResult = { refundId: toolInput.refundId, status: 'processing', estimatedCompletion: '3-5 business days' };
+      break;
     case 'getAccountDetails':
-      return { customerId: toolInput.customerId, name: 'Jane Doe', plan: 'Pro', memberSince: '2024-01' };
+      toolResult = { customerId: toolInput.customerId, name: 'Jane Doe', plan: 'Pro', memberSince: '2024-01' };
+      break;
     default:
-      return { error: `Unknown tool: ${toolName}` };
+      toolResult = { error: `Unknown tool: ${toolName}` };
   }
+
+  // Publish tool result — update the same message with result data
+  if (serial) {
+    await channel.updateMessage({
+      serial,
+      data: JSON.stringify({ toolName, input: toolInput, status: 'complete', result: toolResult }),
+    });
+  }
+
+  return toolResult;
+}
+
+/**
+ * Publish an escalation notice to the session channel so the customer sees it.
+ */
+export async function publishEscalation(
+  sessionId: string,
+  reason: string
+): Promise<void> {
+  const rest = getRestClient();
+  const channel = rest.channels.get(channelName(sessionId));
+  await channel.publish({ name: 'escalation', data: reason });
 }
 
 export async function notifyHumanAgent(
   sessionId: string,
   context: { customerName: string; reason: string; history: Message[] }
-): Promise<void> {
-  const rest = getRestClient();
-  const channel = rest.channels.get('ai:agent:escalations');
-  await channel.publish({
+): Promise<string> {
+  const realtime = getRealtimeClient();
+  const channel = realtime.channels.get('ai:agent:escalations');
+  const result = await channel.publish({
     name: 'escalation',
-    data: {
+    data: JSON.stringify({
       sessionId,
       customerName: context.customerName,
       reason: context.reason,
       messageCount: context.history.length,
-    },
+      status: 'pending',
+    }),
+  });
+  const serial = result.serials[0];
+  if (!serial) throw new Error('Failed to get serial from escalation publish');
+  return serial;
+}
+
+/**
+ * Update the status of an escalation message on the agent dashboard channel.
+ * Uses Ably mutable messages — updateMessage preserves the original message
+ * but replaces its data with the new status.
+ */
+export async function updateEscalationStatus(
+  escalationSerial: string,
+  status: 'responding' | 'resolved' | 'dismissed',
+  sessionId: string
+): Promise<void> {
+  const realtime = getRealtimeClient();
+  const channel = realtime.channels.get('ai:agent:escalations');
+  await channel.updateMessage({
+    serial: escalationSerial,
+    data: JSON.stringify({ status, sessionId }),
   });
 }

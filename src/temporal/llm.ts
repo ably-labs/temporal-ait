@@ -21,7 +21,7 @@ You can help customers with:
 
 Be concise, friendly, and professional. When you need to look up information, use the available tools.
 
-If a customer has a billing dispute, complex complaint, or requests to speak with a human, you should escalate by responding with exactly: [ESCALATE: reason for escalation]
+If a customer has a billing dispute, complex complaint, or requests to speak with a human, use the escalateToHuman tool. Do not try to handle these situations yourself.
 
 Do not make up order details, tracking numbers, or account information — always use the tools to look them up.`;
 
@@ -57,6 +57,17 @@ export const TOOLS: Anthropic.Tool[] = [
         customerId: { type: 'string', description: 'The customer ID or name' },
       },
       required: ['customerId'],
+    },
+  },
+  {
+    name: 'escalateToHuman',
+    description: 'Escalate the conversation to a human support agent. Use this when the customer has a billing dispute, complex complaint, or explicitly requests to speak with a human.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        reason: { type: 'string', description: 'Brief reason for escalation' },
+      },
+      required: ['reason'],
     },
   },
 ];
@@ -161,13 +172,18 @@ export async function streamClaude(
     }
   }
 
-  // Check for escalation pattern in text
-  const escalateMatch = fullText.match(/\[ESCALATE:\s*(.+?)\]/);
-  if (escalateMatch) {
-    return { type: 'escalate', fullText };
-  }
-
   if (hasToolUse) {
+    // Escalation is a tool call — detected by toolName below
+    if (toolName === 'escalateToHuman') {
+      return {
+        type: 'escalate',
+        fullText,
+        toolName,
+        toolInput,
+        toolUseId,
+      };
+    }
+
     // Build the raw content blocks that Claude expects for tool_use round-trips
     const rawContentBlocks: unknown[] = [];
     if (fullText) {

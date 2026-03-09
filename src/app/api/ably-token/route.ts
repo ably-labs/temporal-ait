@@ -14,11 +14,20 @@ export async function GET(request: NextRequest) {
 
   const [keyName, keySecret] = apiKey.split(':');
 
+  // Agents get access to the escalations channel; customers get session channels only
+  const isAgent = clientId === 'support-agent';
+  const capability = isAgent
+    ? {
+        'ai:support:*': ['subscribe', 'history'],
+        'ai:agent:escalations': ['subscribe', 'history'],
+      }
+    : {
+        'ai:support:*': ['subscribe', 'history'],
+      };
+
   const token = jwt.sign(
     {
-      'x-ably-capability': JSON.stringify({
-        'ai:support:*': ['subscribe', 'history'],
-      }),
+      'x-ably-capability': JSON.stringify(capability),
       'x-ably-clientId': clientId,
     },
     keySecret,
@@ -28,5 +37,7 @@ export async function GET(request: NextRequest) {
     }
   );
 
-  return NextResponse.json(token);
+  return new NextResponse(token, {
+    headers: { 'Content-Type': 'application/jwt' },
+  });
 }
