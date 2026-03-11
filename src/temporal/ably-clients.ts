@@ -36,6 +36,18 @@ export function closeRealtimeClient(): void {
   }
 }
 
+/**
+ * Close all per-session Realtime clients. Call this during worker shutdown
+ * to ensure all connections are cleaned up — the shared client shutdown
+ * (closeRealtimeClient) does not cover these.
+ */
+export function closeAllSessionClients(): void {
+  for (const [sessionId, client] of sessionClients) {
+    client.close();
+    sessionClients.delete(sessionId);
+  }
+}
+
 // Per-session Realtime clients for presence.
 // Each session gets its own connection with clientId: 'ai-agent:<sessionId>'
 // so that presence is scoped per-session and works correctly across multiple
