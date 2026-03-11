@@ -87,11 +87,8 @@ export async function supportSessionWorkflow(
       await runAITurn();
     }
   } finally {
-    // Clean up the per-session Ably client when the workflow completes.
-    // This closes the connection, triggering automatic presence leave.
-    await CancellationScope.nonCancellable(async () => {
-      await activities.cleanupSessionClient(sessionId);
-    });
+    // No per-session client cleanup needed — each activity creates and closes
+    // its own Realtime client in a finally block.
   }
 
   /**

@@ -36,57 +36,25 @@ export function closeRealtimeClient(): void {
   }
 }
 
-/**
- * Close all per-session Realtime clients. Call this during worker shutdown
- * to ensure all connections are cleaned up — the shared client shutdown
- * (closeRealtimeClient) does not cover these.
- */
-export function closeAllSessionClients(): void {
-  for (const [sessionId, client] of sessionClients) {
-    client.close();
-    sessionClients.delete(sessionId);
-  }
-}
-
 // Per-session Realtime clients for presence.
-// Each session gets its own connection with clientId: 'ai-agent:<sessionId>'
-// so that presence is scoped per-session and works correctly across multiple
-// Temporal workers. Cached by sessionId so the same session reuses the same
-// client within a worker.
+// Each activity creates and closes its own Realtime client with
+// clientId: 'ai-agent:<sessionId>' so that presence is scoped per-session.
+// There is no cross-activity caching because Temporal activities have no worker
+// affinity — sequential activities from the same workflow can land on different
+// worker processes, making a Map-based cache a leak vector.
 //
-// Design choice: We use a Map rather than per-activity client creation because
-// multiple activities within the same session (callLLMStreaming, executeToolCall)
-// need the same connection for presence continuity. The Map ensures the same
-// clientId reuses the same connection within a worker. Cleanup happens when the
-// workflow completes (cleanupSessionClient activity) or on worker shutdown.
-//
-// SIMPLIFICATION OPPORTUNITY: Each agent session needs its own Realtime client
-// for streaming, subscribing, and presence. The SDK should provide connection
-// pooling with identity isolation — one pooled connection, multiple independent
-// clientIds with their own presence and message identity.
-const sessionClients = new Map<string, Ably.Realtime>();
-
-export function getSessionRealtimeClient(sessionId: string): Ably.Realtime {
-  let client = sessionClients.get(sessionId);
-  if (!client) {
-    client = new Ably.Realtime({
-      key: getApiKey(),
-      // Prevents the agent from receiving its own messages. Future AI Transport SDK
-      // versions may handle this automatically for agent connections.
-      echoMessages: false,
-      clientId: `ai-agent:${sessionId}`,
-    });
-    sessionClients.set(sessionId, client);
-  }
-  return client;
-}
-
-export function closeSessionClient(sessionId: string): void {
-  const client = sessionClients.get(sessionId);
-  if (client) {
-    client.close();
-    sessionClients.delete(sessionId);
-  }
+// SIMPLIFICATION OPPORTUNITY: Each activity creates and closes its own Realtime
+// client (~100-300ms connection overhead per activity). The SDK should provide
+// connection pooling with identity isolation — one pooled connection, multiple
+// independent clientIds with their own presence and message identity.
+export function createSessionRealtimeClient(sessionId: string): Ably.Realtime {
+  return new Ably.Realtime({
+    key: getApiKey(),
+    // Prevents the agent from receiving its own messages. Future AI Transport SDK
+    // versions may handle this automatically for agent connections.
+    echoMessages: false,
+    clientId: `ai-agent:${sessionId}`,
+  });
 }
 
 export function channelName(sessionId: string): string {

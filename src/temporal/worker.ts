@@ -3,7 +3,7 @@ config({ path: '.env.local' });
 
 import { NativeConnection, Worker } from '@temporalio/worker';
 import * as activities from './activities';
-import { closeRealtimeClient, closeAllSessionClients } from './ably-clients';
+import { closeRealtimeClient } from './ably-clients';
 
 async function run() {
   const connection = await NativeConnection.connect({
@@ -21,7 +21,6 @@ async function run() {
   console.log('Temporal worker started, listening on task queue: support-copilot');
 
   const shutdown = () => {
-    closeAllSessionClients();
     closeRealtimeClient();
     process.exit(0);
   };
