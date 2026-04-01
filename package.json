@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "demo": "next build && node scripts/start-prod.mjs",
     "test": "vitest run",
     "lint": "eslint",
     "worker": "ts-node --project tsconfig.worker.json src/temporal/worker.ts"
