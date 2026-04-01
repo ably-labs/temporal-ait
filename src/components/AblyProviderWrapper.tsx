@@ -31,6 +31,9 @@ export default function AblyProviderWrapper({ clientId, children, className }: P
       },
       clientId,
     });
+    ably.connection.on((stateChange) => {
+      console.log(`[Ably] connection: ${stateChange.previous} → ${stateChange.current}`, stateChange.reason?.message || '');
+    });
     setClient(ably);
     return () => {
       ably.close();

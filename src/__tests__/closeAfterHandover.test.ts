@@ -33,7 +33,7 @@ function createMockSessionClient() {
     presenceChannel,
     // Simulate a presence event arriving
     firePresence: (msg: MockPresenceMessage) => {
-      presenceHandler?.(msg as any);
+      presenceHandler?.(msg as unknown as import('ably').default.PresenceMessage);
     },
   };
 }
